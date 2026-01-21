@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Analysis outputs
+*_analysis.png
+
+# Large video files
+*.mov
+*.mp4
+*.avi
+*.mkv
+
