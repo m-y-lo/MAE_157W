@@ -18,6 +18,7 @@ env/
 
 # Analysis outputs
 *_analysis.png
+*_signal.png
 
 # Large video files
 *.mov

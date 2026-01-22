@@ -26,21 +26,25 @@ VIDEO_PATH = "Laser1.mov"  # Path to your wind tunnel video
 
 # Region of Interest (ROI) - (x, y, width, height) in pixels
 # Set these coordinates to capture the wake region behind the object
-ROI_X = 950       # X coordinate of top-left corner
+ROI_X = 800       # X coordinate of top-left corner
 ROI_Y = 500       # Y coordinate of top-left corner
 ROI_WIDTH = 50    # Width of the ROI
 ROI_HEIGHT = 50   # Height of the ROI
 
 # Physical parameters for Strouhal number calculation
 # St = f * L / V
-CHARACTERISTIC_LENGTH = 0.01  # meters (e.g., cylinder diameter)
-FLOW_VELOCITY = 10.0          # m/s (free stream velocity)
+CHARACTERISTIC_LENGTH = 0.059  # meters (e.g., cylinder diameter)
+FLOW_VELOCITY = 0.363          # m/s (free stream velocity)
 
 # Analysis settings
 FRAME_RATE = None        # Set to None to auto-detect from video, or override (fps)
-BANDPASS_LOW = 1.0       # Hz - lower cutoff (filters out DC drift)
-BANDPASS_HIGH = 100.0    # Hz - upper cutoff (filters out high-freq noise)
+BANDPASS_LOW = 0.5       # Hz - lower cutoff (filters out DC drift)
+BANDPASS_HIGH = 5.0    # Hz - upper cutoff (filters out high-freq noise)
 USE_BANDPASS = True      # Enable/disable bandpass filtering
+
+# ROI Brightness Extraction settings
+NORMALIZE_FRAMES = False   # Normalize each frame's ROI by full-frame mean (reduces global lighting changes)
+DETREND_BRIGHTNESS = False  # Apply linear detrending to extracted brightness (removes slow drift)
 
 
 # =============================================================================
@@ -71,28 +75,40 @@ def load_video_info(video_path: str) -> tuple:
     return cap, fps, total_frames, frame_width, frame_height
 
 
-def extract_roi_brightness(cap, roi: tuple, total_frames: int) -> tuple:
+def extract_roi_brightness(cap, roi: tuple, total_frames: int,
+                           normalize: bool = True, 
+                           detrend: bool = True) -> tuple:
     """
-    Extract mean brightness from ROI for each frame.
+    Extract mean brightness from ROI for each frame with optional normalization
+    and detrending to reduce lighting drift.
     
     Args:
         cap: VideoCapture object
         roi: Tuple of (x, y, width, height)
         total_frames: Number of frames to process
+        normalize: If True, normalize ROI brightness by full-frame mean
+                   (reduces effect of global lighting changes)
+        detrend: If True, apply linear detrending to remove slow drift
         
     Returns:
-        brightness: Array of mean brightness values
+        brightness: Array of mean brightness values (raw)
+        brightness_processed: Array of normalized/detrended brightness values
         sample_frame: First frame for visualization
         roi_frame: First frame with ROI overlay
     """
     x, y, w, h = roi
-    brightness = []
+    brightness_raw = []
+    frame_means = []  # For normalization
     sample_frame = None
     roi_frame = None
     
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset to start
     
     print(f"Extracting brightness from {total_frames} frames...")
+    if normalize:
+        print("  • Frame normalization: ENABLED")
+    if detrend:
+        print("  • Linear detrending: ENABLED")
     
     for i in range(total_frames):
         ret, frame = cap.read()
@@ -102,10 +118,15 @@ def extract_roi_brightness(cap, roi: tuple, total_frames: int) -> tuple:
         # Convert to grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
+        # Compute full-frame mean for normalization
+        if normalize:
+            frame_mean = np.mean(gray)
+            frame_means.append(frame_mean)
+        
         # Extract ROI and compute mean brightness
         roi_region = gray[y:y+h, x:x+w]
         mean_brightness = np.mean(roi_region)
-        brightness.append(mean_brightness)
+        brightness_raw.append(mean_brightness)
         
         # Store first frame for visualization
         if i == 0:
@@ -120,7 +141,25 @@ def extract_roi_brightness(cap, roi: tuple, total_frames: int) -> tuple:
         if (i + 1) % 100 == 0 or i == total_frames - 1:
             print(f"  Processed {i + 1}/{total_frames} frames")
     
-    return np.array(brightness), sample_frame, roi_frame
+    brightness_raw = np.array(brightness_raw)
+    brightness_processed = brightness_raw.copy()
+    
+    # Apply normalization: divide ROI brightness by full-frame mean
+    # This reduces the effect of global illumination changes
+    if normalize and len(frame_means) > 0:
+        frame_means = np.array(frame_means)
+        # Normalize: ROI_brightness / frame_mean, then scale back to original range
+        brightness_processed = (brightness_raw / frame_means) * np.mean(frame_means)
+        print(f"  Normalization applied (frame mean range: {frame_means.min():.1f} - {frame_means.max():.1f})")
+    
+    # Apply linear detrending to remove slow lighting drift
+    if detrend:
+        brightness_processed = signal.detrend(brightness_processed, type='linear')
+        # Shift back to positive range for visualization (add back mean)
+        brightness_processed = brightness_processed + np.mean(brightness_raw)
+        print(f"  Linear detrending applied")
+    
+    return brightness_raw, brightness_processed, sample_frame, roi_frame
 
 
 def preprocess_signal(brightness: np.ndarray, fps: float, 
@@ -352,31 +391,19 @@ def calculate_strouhal(frequency: float, length: float, velocity: float) -> floa
     return (frequency * length) / velocity
 
 
-def create_visualization(roi_frame: np.ndarray, 
-                        time: np.ndarray, 
-                        brightness: np.ndarray,
-                        processed_signal: np.ndarray,
-                        frequencies: np.ndarray, 
-                        power: np.ndarray,
-                        peak_freq_fft: float,
-                        strouhal_fft: float,
-                        peaks_fft: np.ndarray,
-                        lags: np.ndarray,
-                        autocorr: np.ndarray,
-                        peak_freq_autocorr: float,
-                        peak_period_autocorr: float,
-                        strouhal_autocorr: float,
-                        peaks_autocorr: np.ndarray) -> plt.Figure:
+def create_signal_figure(roi_frame: np.ndarray, 
+                         time: np.ndarray, 
+                         brightness_raw: np.ndarray,
+                         brightness_normalized: np.ndarray,
+                         processed_signal: np.ndarray) -> plt.Figure:
     """
-    Create a multi-panel visualization of the analysis results.
-    Includes both FFT and Autocorrelation analysis for comparison.
+    Create visualization of the signal data (ROI, raw, normalized, and filtered signals).
     """
-    fig = plt.figure(figsize=(16, 14))
-    fig.suptitle('Vortex Shedding Frequency Analysis\n(FFT vs Autocorrelation Comparison)', 
-                 fontsize=14, fontweight='bold')
+    fig = plt.figure(figsize=(14, 10))
+    fig.suptitle('Vortex Shedding Analysis - Signal Data', fontsize=14, fontweight='bold')
     
-    # Create grid layout - 4 rows, 2 columns
-    gs = fig.add_gridspec(4, 2, height_ratios=[1, 1, 1.2, 1.2], hspace=0.4, wspace=0.25)
+    # Create grid layout - 3 rows, 2 columns
+    gs = fig.add_gridspec(3, 2, height_ratios=[1, 1, 1], hspace=0.4, wspace=0.25)
     
     # Panel 1: Frame with ROI
     ax1 = fig.add_subplot(gs[0, 0])
@@ -388,39 +415,111 @@ def create_visualization(roi_frame: np.ndarray,
     
     # Panel 2: Raw brightness time series
     ax2 = fig.add_subplot(gs[0, 1])
-    ax2.plot(time, brightness, 'b-', linewidth=0.5, alpha=0.7)
+    ax2.plot(time, brightness_raw, 'b-', linewidth=0.5, alpha=0.7)
     ax2.set_title('Raw Brightness Signal', fontweight='bold')
     ax2.set_xlabel('Time (s)')
     ax2.set_ylabel('Mean Brightness (0-255)')
     ax2.grid(True, alpha=0.3)
     
-    # Panel 3: Processed signal (full width)
+    # Add info box showing raw signal stats
+    raw_stats = (
+        f"Raw Signal Stats\n"
+        f"Mean: {np.mean(brightness_raw):.1f}\n"
+        f"Std: {np.std(brightness_raw):.2f}\n"
+        f"Range: {np.ptp(brightness_raw):.1f}"
+    )
+    props = dict(boxstyle='round', facecolor='lightblue', alpha=0.7)
+    ax2.text(0.02, 0.98, raw_stats, transform=ax2.transAxes, fontsize=8,
+             verticalalignment='top', bbox=props, fontfamily='monospace')
+    
+    # Panel 3: Normalized/Detrended brightness (full width)
     ax3 = fig.add_subplot(gs[1, :])
-    ax3.plot(time, processed_signal, 'g-', linewidth=0.5)
-    ax3.set_title('Preprocessed Signal (Detrended & Filtered)', fontweight='bold')
+    ax3.plot(time, brightness_normalized, 'orange', linewidth=0.5, alpha=0.8)
+    
+    # Determine what preprocessing was applied
+    preprocess_label = "Normalized & Detrended" if NORMALIZE_FRAMES and DETREND_BRIGHTNESS else \
+                       "Normalized" if NORMALIZE_FRAMES else \
+                       "Detrended" if DETREND_BRIGHTNESS else "Raw"
+    ax3.set_title(f'Brightness After Extraction Preprocessing ({preprocess_label})', fontweight='bold')
     ax3.set_xlabel('Time (s)')
-    ax3.set_ylabel('Brightness Deviation')
+    ax3.set_ylabel('Brightness')
     ax3.grid(True, alpha=0.3)
     
-    # Panel 4: FFT Power Spectrum (full width)
+    # Add info box
+    norm_stats = (
+        f"Preprocessed Stats\n"
+        f"Mean: {np.mean(brightness_normalized):.1f}\n"
+        f"Std: {np.std(brightness_normalized):.2f}\n"
+        f"Range: {np.ptp(brightness_normalized):.1f}"
+    )
+    props = dict(boxstyle='round', facecolor='moccasin', alpha=0.7)
+    ax3.text(0.02, 0.98, norm_stats, transform=ax3.transAxes, fontsize=8,
+             verticalalignment='top', bbox=props, fontfamily='monospace')
+    
+    # Panel 4: Bandpass filtered signal (full width)
     ax4 = fig.add_subplot(gs[2, :])
-    ax4.semilogy(frequencies, power, 'b-', linewidth=1)
+    ax4.plot(time, processed_signal, 'g-', linewidth=0.5)
+    filter_label = f"Bandpass Filtered ({BANDPASS_LOW}-{BANDPASS_HIGH} Hz)" if USE_BANDPASS else "Detrended Only"
+    ax4.set_title(f'Final Processed Signal ({filter_label})', fontweight='bold')
+    ax4.set_xlabel('Time (s)')
+    ax4.set_ylabel('Brightness Deviation')
+    ax4.grid(True, alpha=0.3)
+    
+    # Add info box
+    proc_stats = (
+        f"Filtered Stats\n"
+        f"Mean: {np.mean(processed_signal):.2e}\n"
+        f"Std: {np.std(processed_signal):.2f}\n"
+        f"Range: {np.ptp(processed_signal):.1f}"
+    )
+    props = dict(boxstyle='round', facecolor='lightgreen', alpha=0.7)
+    ax4.text(0.02, 0.98, proc_stats, transform=ax4.transAxes, fontsize=8,
+             verticalalignment='top', bbox=props, fontfamily='monospace')
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_analysis_figure(frequencies: np.ndarray, 
+                           power: np.ndarray,
+                           peak_freq_fft: float,
+                           strouhal_fft: float,
+                           peaks_fft: np.ndarray,
+                           lags: np.ndarray,
+                           autocorr: np.ndarray,
+                           peak_freq_autocorr: float,
+                           peak_period_autocorr: float,
+                           strouhal_autocorr: float,
+                           peaks_autocorr: np.ndarray) -> plt.Figure:
+    """
+    Create visualization of FFT and Autocorrelation analysis with comparison summary.
+    """
+    fig = plt.figure(figsize=(14, 10))
+    fig.suptitle('Vortex Shedding Analysis - Frequency Comparison\n(FFT vs Autocorrelation)', 
+                 fontsize=14, fontweight='bold')
+    
+    # Create grid layout - 2 rows
+    gs = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.35)
+    
+    # Panel 1: FFT Power Spectrum
+    ax1 = fig.add_subplot(gs[0])
+    ax1.semilogy(frequencies, power, 'b-', linewidth=1)
     
     # Mark FFT peaks
     if len(peaks_fft) > 0:
-        ax4.semilogy(frequencies[peaks_fft], power[peaks_fft], 'r^', markersize=8, 
+        ax1.semilogy(frequencies[peaks_fft], power[peaks_fft], 'r^', markersize=8, 
                      label='Detected peaks')
     
     # Highlight dominant frequency
-    ax4.axvline(x=peak_freq_fft, color='r', linestyle='--', linewidth=2, 
+    ax1.axvline(x=peak_freq_fft, color='r', linestyle='--', linewidth=2, 
                 label=f'Dominant: {peak_freq_fft:.2f} Hz')
     
-    ax4.set_title('FFT Power Spectrum', fontweight='bold')
-    ax4.set_xlabel('Frequency (Hz)')
-    ax4.set_ylabel('Normalized Power')
-    ax4.set_xlim([0, min(frequencies[-1], BANDPASS_HIGH * 2)])
-    ax4.legend(loc='upper right')
-    ax4.grid(True, alpha=0.3)
+    ax1.set_title('FFT Power Spectrum', fontweight='bold')
+    ax1.set_xlabel('Frequency (Hz)')
+    ax1.set_ylabel('Normalized Power')
+    ax1.set_xlim([0, min(frequencies[-1], BANDPASS_HIGH * 2)])
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.3)
     
     # Add FFT results text box
     fft_text = (
@@ -431,39 +530,39 @@ def create_visualization(roi_frame: np.ndarray,
         f"Strouhal: {strouhal_fft:.4f}"
     )
     props = dict(boxstyle='round', facecolor='lightblue', alpha=0.8)
-    ax4.text(0.02, 0.98, fft_text, transform=ax4.transAxes, fontsize=9,
+    ax1.text(0.02, 0.98, fft_text, transform=ax1.transAxes, fontsize=10,
              verticalalignment='top', horizontalalignment='left',
              bbox=props, fontfamily='monospace')
     
-    # Panel 5: Autocorrelation (full width)
-    ax5 = fig.add_subplot(gs[3, :])
+    # Panel 2: Autocorrelation
+    ax2 = fig.add_subplot(gs[1])
     
     # Limit display to reasonable lag range
     max_display_lag = min(2.0, lags[-1])  # Show up to 2 seconds or max available
     display_mask = lags <= max_display_lag
     
-    ax5.plot(lags[display_mask], autocorr[display_mask], 'purple', linewidth=1)
-    ax5.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
+    ax2.plot(lags[display_mask], autocorr[display_mask], 'purple', linewidth=1)
+    ax2.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
     
     # Mark autocorrelation peaks
     if len(peaks_autocorr) > 0:
         valid_peaks = peaks_autocorr[peaks_autocorr < len(lags[display_mask])]
         if len(valid_peaks) > 0:
-            ax5.plot(lags[valid_peaks], autocorr[valid_peaks], 'r^', markersize=8,
+            ax2.plot(lags[valid_peaks], autocorr[valid_peaks], 'r^', markersize=8,
                      label='Detected peaks')
     
     # Highlight first peak (fundamental period)
     if peak_period_autocorr > 0:
-        ax5.axvline(x=peak_period_autocorr, color='r', linestyle='--', linewidth=2,
+        ax2.axvline(x=peak_period_autocorr, color='r', linestyle='--', linewidth=2,
                     label=f'Period: {peak_period_autocorr*1000:.2f} ms')
     
-    ax5.set_title('Autocorrelation Analysis', fontweight='bold')
-    ax5.set_xlabel('Lag (seconds)')
-    ax5.set_ylabel('Autocorrelation')
-    ax5.set_xlim([0, max_display_lag])
-    ax5.set_ylim([-0.5, 1.1])
-    ax5.legend(loc='upper right')
-    ax5.grid(True, alpha=0.3)
+    ax2.set_title('Autocorrelation Analysis', fontweight='bold')
+    ax2.set_xlabel('Lag (seconds)')
+    ax2.set_ylabel('Autocorrelation')
+    ax2.set_xlim([0, max_display_lag])
+    ax2.set_ylim([-0.5, 1.1])
+    ax2.legend(loc='upper right')
+    ax2.grid(True, alpha=0.3)
     
     # Add Autocorrelation results text box
     autocorr_text = (
@@ -474,26 +573,31 @@ def create_visualization(roi_frame: np.ndarray,
         f"Strouhal: {strouhal_autocorr:.4f}"
     )
     props = dict(boxstyle='round', facecolor='plum', alpha=0.8)
-    ax5.text(0.02, 0.98, autocorr_text, transform=ax5.transAxes, fontsize=9,
+    ax2.text(0.02, 0.98, autocorr_text, transform=ax2.transAxes, fontsize=10,
              verticalalignment='top', horizontalalignment='left',
              bbox=props, fontfamily='monospace')
     
     # Add comparison summary text box
     freq_diff = abs(peak_freq_fft - peak_freq_autocorr)
     freq_diff_pct = 100 * freq_diff / peak_freq_fft if peak_freq_fft > 0 else 0
+    avg_freq = (peak_freq_fft + peak_freq_autocorr) / 2
+    avg_strouhal = (strouhal_fft + strouhal_autocorr) / 2
     
     comparison_text = (
         f"Comparison Summary\n"
-        f"{'═' * 30}\n"
-        f"FFT Frequency:    {peak_freq_fft:.3f} Hz\n"
-        f"Autocorr Freq:    {peak_freq_autocorr:.3f} Hz\n"
-        f"Difference:       {freq_diff:.3f} Hz ({freq_diff_pct:.1f}%)\n"
-        f"{'─' * 30}\n"
-        f"Characteristic L: {CHARACTERISTIC_LENGTH*1000:.2f} mm\n"
-        f"Flow Velocity:    {FLOW_VELOCITY:.2f} m/s"
+        f"{'═' * 32}\n"
+        f"FFT Frequency:      {peak_freq_fft:.3f} Hz\n"
+        f"Autocorr Freq:      {peak_freq_autocorr:.3f} Hz\n"
+        f"Difference:         {freq_diff:.3f} Hz ({freq_diff_pct:.1f}%)\n"
+        f"{'─' * 32}\n"
+        f"Average Frequency:  {avg_freq:.3f} Hz\n"
+        f"Average Strouhal:   {avg_strouhal:.4f}\n"
+        f"{'─' * 32}\n"
+        f"Characteristic L:   {CHARACTERISTIC_LENGTH*1000:.2f} mm\n"
+        f"Flow Velocity:      {FLOW_VELOCITY:.2f} m/s"
     )
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.9)
-    ax5.text(0.98, 0.98, comparison_text, transform=ax5.transAxes, fontsize=9,
+    ax2.text(0.98, 0.98, comparison_text, transform=ax2.transAxes, fontsize=10,
              verticalalignment='top', horizontalalignment='right',
              bbox=props, fontfamily='monospace')
     
@@ -593,17 +697,21 @@ def main():
     
     print(f"ROI: x={ROI_X}, y={ROI_Y}, width={ROI_WIDTH}, height={ROI_HEIGHT}")
     
-    # Extract brightness from ROI
-    brightness, sample_frame, roi_frame = extract_roi_brightness(cap, roi, total_frames)
+    # Extract brightness from ROI (with optional normalization and detrending)
+    brightness_raw, brightness_normalized, sample_frame, roi_frame = extract_roi_brightness(
+        cap, roi, total_frames,
+        normalize=NORMALIZE_FRAMES,
+        detrend=DETREND_BRIGHTNESS
+    )
     cap.release()
     
     # Create time array
-    time = np.arange(len(brightness)) / fps
+    time = np.arange(len(brightness_raw)) / fps
     
-    # Preprocess signal
-    print("\nPreprocessing signal...")
+    # Preprocess signal (bandpass filtering on the normalized/detrended brightness)
+    print("\nPreprocessing signal (bandpass filtering)...")
     processed_signal = preprocess_signal(
-        brightness, fps, 
+        brightness_normalized, fps, 
         BANDPASS_LOW, BANDPASS_HIGH,
         USE_BANDPASS
     )
@@ -640,21 +748,33 @@ def main():
                   peak_freq_autocorr, peak_period_autocorr, strouhal_autocorr,
                   fps, total_frames, duration)
     
-    # Create visualization
+    # Create visualizations
     print("Generating plots...")
-    fig = create_visualization(
-        roi_frame, time, brightness, processed_signal,
+    
+    # Figure 1: Signal data (ROI, raw, normalized, and filtered signals)
+    fig_signal = create_signal_figure(
+        roi_frame, time, brightness_raw, brightness_normalized, processed_signal
+    )
+    
+    # Figure 2: Frequency analysis (FFT and Autocorrelation with summary)
+    fig_analysis = create_analysis_figure(
         frequencies, power, peak_freq_fft, strouhal_fft, peaks_fft,
         lags, autocorr, peak_freq_autocorr, peak_period_autocorr, 
         strouhal_autocorr, peaks_autocorr
     )
     
-    # Save figure
-    output_path = Path(VIDEO_PATH).stem + "_analysis.png"
-    fig.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Figure saved: {output_path}")
+    # Save figures
+    base_name = Path(VIDEO_PATH).stem
     
-    # Show plot
+    signal_path = base_name + "_signal.png"
+    fig_signal.savefig(signal_path, dpi=150, bbox_inches='tight')
+    print(f"Signal figure saved: {signal_path}")
+    
+    analysis_path = base_name + "_analysis.png"
+    fig_analysis.savefig(analysis_path, dpi=150, bbox_inches='tight')
+    print(f"Analysis figure saved: {analysis_path}")
+    
+    # Show plots
     plt.show()
     
     print("\nAnalysis complete!")
