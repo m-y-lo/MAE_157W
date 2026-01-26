@@ -37,7 +37,7 @@ CHARACTERISTIC_LENGTH = 0.059  # meters (e.g., cylinder diameter)
 FLOW_VELOCITY = 0.363          # m/s (free stream velocity)
 
 # Analysis settings
-FRAME_RATE = None        # Set to None to auto-detect from video, or override (fps)
+FRAME_RATE = 240        # Set to None to auto-detect from video, or override (fps)
 BANDPASS_LOW = 0.5       # Hz - lower cutoff (filters out DC drift)
 BANDPASS_HIGH = 5.0    # Hz - upper cutoff (filters out high-freq noise)
 USE_BANDPASS = True      # Enable/disable bandpass filtering
