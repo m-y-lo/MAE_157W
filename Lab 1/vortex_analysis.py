@@ -1,785 +1,578 @@
-#!/usr/bin/env python3
 """
-Vortex Shedding Frequency Analyzer
-==================================
-Analyzes wind tunnel video to detect vortex shedding frequency by tracking
-brightness oscillations in a defined region of interest (ROI), then computes
-the Strouhal number.
+Multi-ROI Segmented Vortex Shedding Analyzer (4 ROIs + 5 Segments)
+==================================================================
+Analyzes wind tunnel video by splitting it into temporal segments and
+tracking brightness in 4 spatial ROIs. Computes advanced signal quality
+metrics and error analysis.
 
-Author: MAE 157W Lab 1
+Author: MAE 157W Lab 1 (Refactored for Segmentation & Metrics)
 """
 
 import cv2
 import numpy as np
+import pandas as pd
 from scipy import signal
 from scipy.fft import rfft, rfftfreq
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-
 # =============================================================================
-# CONFIGURATION - Modify these parameters for your experiment
+# CONFIGURATION
 # =============================================================================
 
-# Video settings
-VIDEO_PATH = "Laser1.mov"  # Path to your wind tunnel video
+VIDEO_PATH = "Laser1.mov"
 
-# Region of Interest (ROI) - (x, y, width, height) in pixels
-# Set these coordinates to capture the wake region behind the object
-ROI_X = 800       # X coordinate of top-left corner
-ROI_Y = 500       # Y coordinate of top-left corner
-ROI_WIDTH = 50    # Width of the ROI
-ROI_HEIGHT = 50   # Height of the ROI
+# --- ROIs (x, y, w, h) ---
+ROIS = [
+    {"coords": (775, 550, 50, 50), "label": "ROI 1 (0.5-1.0D, Narrow)"},
+    {"coords": (775, 550, 100, 50), "label": "ROI 2 (0.5-1.0D, Wide)"},
+    {"coords": (900, 550, 50, 50), "label": "ROI 3 (1.0-1.5D, Narrow)"},
+    {"coords": (900, 550, 100, 50), "label": "ROI 4 (1.0-1.5D, Wide)"}
+]
 
-# Physical parameters for Strouhal number calculation
+# --- Segmentation Settings ---
+NUM_SEGMENTS = 5  # Split video into this many equal time chunks
+
+# --- Physical Parameters & Uncertainty ---
 # St = f * L / V
-CHARACTERISTIC_LENGTH = 0.059  # meters (e.g., cylinder diameter)
-FLOW_VELOCITY = 0.363          # m/s (free stream velocity)
+L_CHAR = 0.059       # meters (Diameter)
+L_UNCERTAINTY = 0.001 # meters (e.g. 0.5mm uncertainty)
 
-# Analysis settings
-FRAME_RATE = 240        # Set to None to auto-detect from video, or override (fps)
-BANDPASS_LOW = 0.5       # Hz - lower cutoff (filters out DC drift)
-BANDPASS_HIGH = 5.0    # Hz - upper cutoff (filters out high-freq noise)
-USE_BANDPASS = True      # Enable/disable bandpass filtering
+V_FLOW = 0.363       # m/s
+V_UNCERTAINTY = 0.0364 # m/s (e.g. 0.01 m/s uncertainty)
 
-# ROI Brightness Extraction settings
-NORMALIZE_FRAMES = False   # Normalize each frame's ROI by full-frame mean (reduces global lighting changes)
-DETREND_BRIGHTNESS = False  # Apply linear detrending to extracted brightness (removes slow drift)
-
+# --- Signal Processing ---
+FRAME_RATE = 240         # Set None to auto-detect
+BANDPASS_LOW = 0.5       
+BANDPASS_HIGH = 5.0      
+USE_BANDPASS = True      
+NORMALIZE_FRAMES = True  
+DETREND_BRIGHTNESS = True
 
 # =============================================================================
-# ANALYSIS FUNCTIONS
+# DATA STRUCTURES
 # =============================================================================
 
-def load_video_info(video_path: str) -> tuple:
-    """
-    Load video and extract metadata.
-    
-    Returns:
-        cap: VideoCapture object
-        fps: Frame rate
-        total_frames: Total number of frames
-        frame_width: Video width in pixels
-        frame_height: Video height in pixels
-    """
-    cap = cv2.VideoCapture(video_path)
-    
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Could not open video file: {video_path}")
-    
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    return cap, fps, total_frames, frame_width, frame_height
+class VideoLoader:
+    @staticmethod
+    def load_info(path):
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Cannot open {path}")
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        return cap, fps, total
 
+    @staticmethod
+    def extract_all_brightness(cap, rois, total_frames, normalize=True):
+        """Extracts full time series for all ROIs at once. Also captures first frame with ROIs."""
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        data = [[] for _ in rois]
+        frame_means = []
+        roi_frame = None  # Store first frame with ROI overlay
+        
+        # Define colors for each ROI (BGR format)
+        colors = [(0, 255, 0), (255, 0, 0), (0, 255, 255), (255, 0, 255)]  # Green, Blue, Yellow, Magenta
+        
+        print(f"Extracting full video brightness ({total_frames} frames)...")
+        for i in range(total_frames):
+            ret, frame = cap.read()
+            if not ret: break
+            
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if normalize:
+                frame_means.append(np.mean(gray))
+            
+            # Store first frame with ROI overlays
+            if i == 0:
+                roi_frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+                for idx, roi in enumerate(rois):
+                    x, y, w, h = roi["coords"]
+                    color = colors[idx % len(colors)]
+                    cv2.rectangle(roi_frame, (x, y), (x+w, y+h), color, 2)
+                    cv2.putText(roi_frame, f"ROI {idx+1}", (x, y-10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+            for idx, roi in enumerate(rois):
+                x, y, w, h = roi["coords"]
+                data[idx].append(np.mean(gray[y:y+h, x:x+w]))
+                
+            if (i+1) % 500 == 0:
+                print(f"  Frame {i+1}/{total_frames}")
 
-def extract_roi_brightness(cap, roi: tuple, total_frames: int,
-                           normalize: bool = True, 
-                           detrend: bool = True) -> tuple:
-    """
-    Extract mean brightness from ROI for each frame with optional normalization
-    and detrending to reduce lighting drift.
-    
-    Args:
-        cap: VideoCapture object
-        roi: Tuple of (x, y, width, height)
-        total_frames: Number of frames to process
-        normalize: If True, normalize ROI brightness by full-frame mean
-                   (reduces effect of global lighting changes)
-        detrend: If True, apply linear detrending to remove slow drift
-        
-    Returns:
-        brightness: Array of mean brightness values (raw)
-        brightness_processed: Array of normalized/detrended brightness values
-        sample_frame: First frame for visualization
-        roi_frame: First frame with ROI overlay
-    """
-    x, y, w, h = roi
-    brightness_raw = []
-    frame_means = []  # For normalization
-    sample_frame = None
-    roi_frame = None
-    
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset to start
-    
-    print(f"Extracting brightness from {total_frames} frames...")
-    if normalize:
-        print("  • Frame normalization: ENABLED")
-    if detrend:
-        print("  • Linear detrending: ENABLED")
-    
-    for i in range(total_frames):
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Compute full-frame mean for normalization
-        if normalize:
-            frame_mean = np.mean(gray)
-            frame_means.append(frame_mean)
-        
-        # Extract ROI and compute mean brightness
-        roi_region = gray[y:y+h, x:x+w]
-        mean_brightness = np.mean(roi_region)
-        brightness_raw.append(mean_brightness)
-        
-        # Store first frame for visualization
-        if i == 0:
-            sample_frame = gray.copy()
-            # Create color version with ROI overlay
-            roi_frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            cv2.rectangle(roi_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            cv2.putText(roi_frame, "ROI", (x, y-10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        
-        # Progress indicator
-        if (i + 1) % 100 == 0 or i == total_frames - 1:
-            print(f"  Processed {i + 1}/{total_frames} frames")
-    
-    brightness_raw = np.array(brightness_raw)
-    brightness_processed = brightness_raw.copy()
-    
-    # Apply normalization: divide ROI brightness by full-frame mean
-    # This reduces the effect of global illumination changes
-    if normalize and len(frame_means) > 0:
+        # Post-process arrays
+        processed_data = []
+        raw_data = []
         frame_means = np.array(frame_means)
-        # Normalize: ROI_brightness / frame_mean, then scale back to original range
-        brightness_processed = (brightness_raw / frame_means) * np.mean(frame_means)
-        print(f"  Normalization applied (frame mean range: {frame_means.min():.1f} - {frame_means.max():.1f})")
-    
-    # Apply linear detrending to remove slow lighting drift
-    if detrend:
-        brightness_processed = signal.detrend(brightness_processed, type='linear')
-        # Shift back to positive range for visualization (add back mean)
-        brightness_processed = brightness_processed + np.mean(brightness_raw)
-        print(f"  Linear detrending applied")
-    
-    return brightness_raw, brightness_processed, sample_frame, roi_frame
-
-
-def preprocess_signal(brightness: np.ndarray, fps: float, 
-                      low_freq: float, high_freq: float,
-                      use_bandpass: bool = True) -> np.ndarray:
-    """
-    Preprocess the brightness signal: detrend and optionally bandpass filter.
-    
-    Args:
-        brightness: Raw brightness time series
-        fps: Sampling frequency (frames per second)
-        low_freq: Lower cutoff frequency (Hz)
-        high_freq: Upper cutoff frequency (Hz)
-        use_bandpass: Whether to apply bandpass filter
         
-    Returns:
-        Preprocessed signal
-    """
-    # Remove linear trend (DC offset and drift)
-    detrended = signal.detrend(brightness, type='linear')
-    
-    if use_bandpass and fps > 2 * high_freq:
-        # Design Butterworth bandpass filter
-        nyquist = fps / 2
-        low = low_freq / nyquist
-        high = min(high_freq / nyquist, 0.99)  # Ensure < 1
-        
-        if low < high and low > 0:
-            b, a = signal.butter(4, [low, high], btype='band')
-            filtered = signal.filtfilt(b, a, detrended)
-            return filtered
-    
-    return detrended
+        for raw_list in data:
+            raw = np.array(raw_list)
+            raw_data.append(raw.copy())
+            # Normalize
+            if normalize and len(frame_means) > 0:
+                sig = (raw / frame_means) * np.mean(frame_means)
+            else:
+                sig = raw
+            
+            processed_data.append(sig)
+            
+        return raw_data, processed_data, roi_frame
 
+# =============================================================================
+# ANALYSIS LOGIC
+# =============================================================================
 
-def compute_fft(signal_data: np.ndarray, fps: float) -> tuple:
+def calculate_uncertainty(f, L, V, dL, dV, df=0.0):
     """
-    Compute FFT of the signal to find frequency content.
-    
-    Args:
-        signal_data: Preprocessed time series
-        fps: Sampling frequency
-        
-    Returns:
-        frequencies: Array of frequencies (Hz)
-        power: Power spectrum (magnitude squared)
-    """
-    n = len(signal_data)
-    
-    # Apply window function to reduce spectral leakage
-    window = np.hanning(n)
-    windowed_signal = signal_data * window
-    
-    # Compute real FFT (signal is real-valued)
-    fft_result = rfft(windowed_signal)
-    frequencies = rfftfreq(n, d=1/fps)
-    
-    # Compute power spectrum (magnitude squared)
-    power = np.abs(fft_result) ** 2
-    
-    # Normalize
-    power = power / np.max(power)
-    
-    return frequencies, power
-
-
-def find_dominant_frequency(frequencies: np.ndarray, power: np.ndarray,
-                            min_freq: float = 0.5) -> tuple:
-    """
-    Find the dominant frequency (highest peak) in the power spectrum.
-    
-    Args:
-        frequencies: Frequency array
-        power: Power spectrum
-        min_freq: Minimum frequency to consider (ignore DC component)
-        
-    Returns:
-        peak_freq: Dominant frequency (Hz)
-        peak_power: Power at dominant frequency
-        all_peaks: Indices of all detected peaks
-    """
-    # Find peaks in the power spectrum
-    # Only consider frequencies above min_freq
-    valid_idx = frequencies > min_freq
-    valid_freqs = frequencies[valid_idx]
-    valid_power = power[valid_idx]
-    
-    # Find peaks with minimum prominence
-    peaks, properties = signal.find_peaks(valid_power, 
-                                          prominence=0.1,
-                                          distance=5)
-    
-    if len(peaks) == 0:
-        # No clear peaks found, use maximum
-        max_idx = np.argmax(valid_power)
-        return valid_freqs[max_idx], valid_power[max_idx], []
-    
-    # Find the highest peak
-    peak_powers = valid_power[peaks]
-    dominant_idx = peaks[np.argmax(peak_powers)]
-    
-    peak_freq = valid_freqs[dominant_idx]
-    peak_power = valid_power[dominant_idx]
-    
-    # Convert peak indices back to original array indexing
-    original_peaks = np.where(valid_idx)[0][peaks]
-    
-    return peak_freq, peak_power, original_peaks
-
-
-def compute_autocorrelation(signal_data: np.ndarray, fps: float) -> tuple:
-    """
-    Compute the autocorrelation of the signal to find periodic patterns.
-    
-    Autocorrelation measures the similarity of a signal with a delayed copy
-    of itself. For periodic signals, peaks in the autocorrelation correspond
-    to the period of oscillation.
-    
-    Args:
-        signal_data: Preprocessed time series
-        fps: Sampling frequency (frames per second)
-        
-    Returns:
-        lags: Time lag array (seconds)
-        autocorr: Normalized autocorrelation values
-    """
-    n = len(signal_data)
-    
-    # Normalize signal (zero mean, unit variance)
-    sig_normalized = (signal_data - np.mean(signal_data)) / np.std(signal_data)
-    
-    # Compute full autocorrelation using numpy correlate
-    autocorr_full = np.correlate(sig_normalized, sig_normalized, mode='full')
-    
-    # Take only the positive lags (second half)
-    autocorr = autocorr_full[n-1:]
-    
-    # Normalize by the zero-lag value (which equals n for normalized signal)
-    autocorr = autocorr / autocorr[0]
-    
-    # Create lag array in seconds
-    lags = np.arange(len(autocorr)) / fps
-    
-    return lags, autocorr
-
-
-def find_autocorr_frequency(lags: np.ndarray, autocorr: np.ndarray, 
-                            fps: float, min_freq: float = 0.5) -> tuple:
-    """
-    Find the dominant frequency from autocorrelation peaks.
-    
-    The first significant peak after lag=0 corresponds to the fundamental
-    period of the signal.
-    
-    Args:
-        lags: Time lag array (seconds)
-        autocorr: Normalized autocorrelation values
-        fps: Sampling frequency
-        min_freq: Minimum frequency to consider (Hz)
-        
-    Returns:
-        peak_freq: Dominant frequency from autocorrelation (Hz)
-        peak_period: Period corresponding to dominant frequency (seconds)
-        peak_indices: Indices of all detected peaks
-        peak_lags: Lag values at detected peaks (seconds)
-    """
-    # Minimum lag corresponding to maximum frequency we care about
-    max_period = 1.0 / min_freq  # Maximum period in seconds
-    min_lag_samples = int(fps / (BANDPASS_HIGH if USE_BANDPASS else 100))  # Skip very short lags
-    
-    # Only look at lags beyond the initial decay and up to max_period
-    max_lag_samples = min(int(max_period * fps * 2), len(autocorr) - 1)
-    
-    # Find peaks in the autocorrelation
-    # Start search after min_lag_samples to avoid the central peak
-    search_start = max(min_lag_samples, 3)
-    search_autocorr = autocorr[search_start:max_lag_samples]
-    
-    # Find peaks with minimum height and distance
-    peaks, properties = signal.find_peaks(
-        search_autocorr,
-        height=0.1,  # Minimum correlation of 0.1
-        distance=int(fps * 0.01),  # Minimum distance between peaks
-        prominence=0.05
-    )
-    
-    if len(peaks) == 0:
-        # No clear peaks found, return estimate from first zero crossing
-        zero_crossings = np.where(np.diff(np.sign(autocorr[search_start:max_lag_samples])))[0]
-        if len(zero_crossings) >= 2:
-            # Estimate period from zero crossings (half period between consecutive crossings)
-            half_period_samples = zero_crossings[1] - zero_crossings[0]
-            period_samples = 2 * half_period_samples + search_start
-            period = period_samples / fps
-            return 1.0 / period, period, [], []
-        return 0.0, 0.0, [], []
-    
-    # Adjust peak indices to account for search_start offset
-    peaks_adjusted = peaks + search_start
-    
-    # The first significant peak gives the fundamental period
-    first_peak_idx = peaks_adjusted[0]
-    peak_period = lags[first_peak_idx]
-    peak_freq = 1.0 / peak_period if peak_period > 0 else 0.0
-    
-    # Get lag values at all peaks
-    peak_lags = lags[peaks_adjusted]
-    
-    return peak_freq, peak_period, peaks_adjusted, peak_lags
-
-
-def calculate_strouhal(frequency: float, length: float, velocity: float) -> float:
-    """
-    Calculate the Strouhal number.
-    
+    Calculates standard deviation of Strouhal number based on error propagation.
     St = f * L / V
+    (dSt/St)^2 = (df/f)^2 + (dL/L)^2 + (dV/V)^2
+    Assuming df (freq error) is negligible compared to physical measurement error usually, 
+    but can be added if resolution is known.
+    """
+    St = (f * L) / V
+    if f == 0: return 0.0, 0.0
     
-    Args:
-        frequency: Vortex shedding frequency (Hz)
-        length: Characteristic length (m)
-        velocity: Flow velocity (m/s)
+    # Relative variances
+    rel_var_L = (dL / L) ** 2
+    rel_var_V = (dV / V) ** 2
+    rel_var_f = (df / f) ** 2
+    
+    rel_uncertainty = np.sqrt(rel_var_f + rel_var_L + rel_var_V)
+    abs_uncertainty = St * rel_uncertainty
+    
+    return St, abs_uncertainty
+
+def analyze_segment(signal_seg, fps):
+    """
+    Computes metrics for a single segment of data.
+    """
+    n = len(signal_seg)
+    if n < 2: return None
+    
+    # 1. Preprocess (Detrend & Filter)
+    sig_dt = signal.detrend(signal_seg, type='linear')
+    if USE_BANDPASS and fps > 2*BANDPASS_HIGH:
+        nyq = 0.5 * fps
+        b, a = signal.butter(4, [BANDPASS_LOW/nyq, BANDPASS_HIGH/nyq], btype='band')
+        filtered = signal.filtfilt(b, a, sig_dt)
+    else:
+        filtered = sig_dt
+
+    # 2. FFT Analysis & FQ (FFT Peak Quality)
+    window = np.hanning(n)
+    fft_res = rfft(filtered * window)
+    freqs = rfftfreq(n, d=1/fps)
+    power = np.abs(fft_res) ** 2
+    
+    # Find peak
+    valid_mask = (freqs >= BANDPASS_LOW) & (freqs <= BANDPASS_HIGH)
+    if not np.any(valid_mask):
+        f_fft = 0.0
+        FQ = 0.0
+    else:
+        # Restrict search to valid band
+        idx_search = np.where(valid_mask)[0]
+        idx_peak_local = np.argmax(power[valid_mask])
+        idx_peak = idx_search[idx_peak_local]
+        f_fft = freqs[idx_peak]
+        amp_peak = power[idx_peak]
         
-    Returns:
-        Strouhal number (dimensionless)
-    """
-    if velocity <= 0:
-        raise ValueError("Flow velocity must be positive")
+        # FQ Calculation: Peak vs Local Noise
+        # Define noise band: +/- 1 Hz around peak, excluding +/- 0.1 Hz around peak
+        mask_noise = (freqs > f_fft - 1.0) & (freqs < f_fft + 1.0)
+        mask_peak_excl = (freqs > f_fft - 0.2) & (freqs < f_fft + 0.2)
+        mask_final = mask_noise & (~mask_peak_excl)
+        
+        if np.any(mask_final):
+            noise_floor = np.mean(power[mask_final])
+            FQ = amp_peak / noise_floor if noise_floor > 0 else 0.0
+        else:
+            FQ = 0.0
+
+    # 3. Autocorrelation & PS/PSRQ
+    norm_sig = (filtered - np.mean(filtered)) / (np.std(filtered) + 1e-9)
+    ac_full = np.correlate(norm_sig, norm_sig, mode='full')
+    ac = ac_full[n-1:]
+    ac = ac / ac[0] # Normalize R(0)=1
+    lags = np.arange(len(ac)) / fps
     
-    return (frequency * length) / velocity
+    # Find peaks for PS
+    # Min distance = 1/max_freq
+    min_dist = int(fps / BANDPASS_HIGH)
+    peaks, _ = signal.find_peaks(ac, height=0.0, distance=min_dist)
+    
+    # Ignore peaks at very low lag (noise)
+    peaks = [p for p in peaks if lags[p] > 0.5/BANDPASS_HIGH]
+    
+    if len(peaks) > 0:
+        first_peak_idx = peaks[0]
+        T_period = lags[first_peak_idx]
+        f_ac = 1.0 / T_period
+        
+        # B) PS: Strength of first peak
+        PS = ac[first_peak_idx] # Already normalized by R(0)
+        
+        # C) PSRQ: Peak to Background Std Dev
+        # Background is everything not near 0 and not near the peak? 
+        # Simpler definition: Std dev of AC tail
+        mask_bg = (lags > T_period * 1.5)
+        if np.any(mask_bg):
+            bg_std = np.std(ac[mask_bg])
+            PSRQ = PS / bg_std if bg_std > 0 else 0.0
+        else:
+            PSRQ = 0.0
+    else:
+        f_ac = 0.0
+        PS = 0.0
+        PSRQ = 0.0
+
+    # D) Method Agreement (FA)
+    if f_fft > 0 and f_ac > 0:
+        FA = abs(f_fft - f_ac) / ((f_fft + f_ac)/2) * 100
+    else:
+        FA = np.nan
+
+    return {
+        "f_fft": f_fft,
+        "f_ac": f_ac,
+        "FQ": FQ,
+        "PS": PS,
+        "PSRQ": PSRQ,
+        "FA": FA
+    }
+
+def compile_roi_statistics(roi_label, segment_results):
+    """
+    Aggregates results from multiple segments for a single ROI.
+    """
+    df = pd.DataFrame(segment_results)
+    
+    # Averages
+    mean_fft = df["f_fft"].mean()
+    mean_ac = df["f_ac"].mean()
+    mean_FQ = df["FQ"].mean()
+    mean_PS = df["PS"].mean()
+    mean_PSRQ = df["PSRQ"].mean()
+    mean_FA = df["FA"].mean()
+    
+    # E) Repeatability (RepCV)
+    # Using FFT freq for consistency check
+    if mean_fft > 0:
+        rep_cv_fft = (df["f_fft"].std() / mean_fft) * 100
+    else:
+        rep_cv_fft = 0.0
+    
+    if mean_ac > 0:
+        rep_cv_ac = (df["f_ac"].std() / mean_ac) * 100
+    else:
+        rep_cv_ac = 0.0
+        
+    # F) Strouhal Error - Calculate for both FFT and AC frequencies
+    st_fft, st_fft_err = calculate_uncertainty(mean_fft, L_CHAR, V_FLOW, 
+                                               L_UNCERTAINTY, V_UNCERTAINTY)
+    st_ac, st_ac_err = calculate_uncertainty(mean_ac, L_CHAR, V_FLOW, 
+                                             L_UNCERTAINTY, V_UNCERTAINTY)
+    
+    return {
+        "ROI": roi_label,
+        "f_fft": mean_fft,
+        "f_ac": mean_ac,
+        "FQ": mean_FQ,
+        "PS": mean_PS,
+        "PSRQ": mean_PSRQ,
+        "FA_pct": mean_FA,
+        "RepCV_fft": rep_cv_fft,
+        "RepCV_ac": rep_cv_ac,
+        "St_fft": st_fft,
+        "St_fft_err": st_fft_err,
+        "St_ac": st_ac,
+        "St_ac_err": st_ac_err
+    }
 
 
-def create_signal_figure(roi_frame: np.ndarray, 
-                         time: np.ndarray, 
-                         brightness_raw: np.ndarray,
-                         brightness_normalized: np.ndarray,
-                         processed_signal: np.ndarray) -> plt.Figure:
+# =============================================================================
+# VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def create_signal_figure(roi_frame, time, raw_signals, processed_signals, rois, fps):
     """
-    Create visualization of the signal data (ROI, raw, normalized, and filtered signals).
+    Create Figure 1: Video frame with ROIs and extracted/processed signals.
     """
-    fig = plt.figure(figsize=(14, 10))
-    fig.suptitle('Vortex Shedding Analysis - Signal Data', fontsize=14, fontweight='bold')
+    n_rois = len(rois)
+    colors = ['green', 'blue', 'orange', 'magenta']
     
-    # Create grid layout - 3 rows, 2 columns
-    gs = fig.add_gridspec(3, 2, height_ratios=[1, 1, 1], hspace=0.4, wspace=0.25)
+    fig = plt.figure(figsize=(16, 10))
+    fig.suptitle('Vortex Shedding Analysis - Signal Extraction', fontsize=14, fontweight='bold')
     
-    # Panel 1: Frame with ROI
-    ax1 = fig.add_subplot(gs[0, 0])
+    # Layout: 3 rows - Frame | Raw Signals | Processed Signals
+    gs = fig.add_gridspec(3, 1, height_ratios=[1.2, 1, 1], hspace=0.35)
+    
+    # Panel 1: Video frame with ROIs
+    ax1 = fig.add_subplot(gs[0])
     if roi_frame is not None:
         ax1.imshow(cv2.cvtColor(roi_frame, cv2.COLOR_BGR2RGB))
-    ax1.set_title('Video Frame with ROI', fontweight='bold')
+    ax1.set_title('Video Frame with ROI Locations', fontweight='bold')
     ax1.set_xlabel('X (pixels)')
     ax1.set_ylabel('Y (pixels)')
     
-    # Panel 2: Raw brightness time series
-    ax2 = fig.add_subplot(gs[0, 1])
-    ax2.plot(time, brightness_raw, 'b-', linewidth=0.5, alpha=0.7)
-    ax2.set_title('Raw Brightness Signal', fontweight='bold')
+    # Panel 2: Raw brightness signals
+    ax2 = fig.add_subplot(gs[1])
+    for i, (raw, roi) in enumerate(zip(raw_signals, rois)):
+        ax2.plot(time, raw, color=colors[i % len(colors)], linewidth=0.5, 
+                 alpha=0.8, label=roi["label"])
+    ax2.set_title('Raw Brightness Signals', fontweight='bold')
     ax2.set_xlabel('Time (s)')
-    ax2.set_ylabel('Mean Brightness (0-255)')
+    ax2.set_ylabel('Mean Brightness')
+    ax2.legend(loc='upper right', fontsize=8)
     ax2.grid(True, alpha=0.3)
     
-    # Add info box showing raw signal stats
-    raw_stats = (
-        f"Raw Signal Stats\n"
-        f"Mean: {np.mean(brightness_raw):.1f}\n"
-        f"Std: {np.std(brightness_raw):.2f}\n"
-        f"Range: {np.ptp(brightness_raw):.1f}"
-    )
-    props = dict(boxstyle='round', facecolor='lightblue', alpha=0.7)
-    ax2.text(0.02, 0.98, raw_stats, transform=ax2.transAxes, fontsize=8,
-             verticalalignment='top', bbox=props, fontfamily='monospace')
-    
-    # Panel 3: Normalized/Detrended brightness (full width)
-    ax3 = fig.add_subplot(gs[1, :])
-    ax3.plot(time, brightness_normalized, 'orange', linewidth=0.5, alpha=0.8)
-    
-    # Determine what preprocessing was applied
-    preprocess_label = "Normalized & Detrended" if NORMALIZE_FRAMES and DETREND_BRIGHTNESS else \
-                       "Normalized" if NORMALIZE_FRAMES else \
-                       "Detrended" if DETREND_BRIGHTNESS else "Raw"
-    ax3.set_title(f'Brightness After Extraction Preprocessing ({preprocess_label})', fontweight='bold')
+    # Panel 3: Processed (normalized) signals
+    ax3 = fig.add_subplot(gs[2])
+    for i, (proc, roi) in enumerate(zip(processed_signals, rois)):
+        # Apply detrending for display
+        proc_dt = signal.detrend(proc, type='linear')
+        ax3.plot(time, proc_dt, color=colors[i % len(colors)], linewidth=0.5, 
+                 alpha=0.8, label=roi["label"])
+    ax3.set_title('Processed Signals (Normalized & Detrended)', fontweight='bold')
     ax3.set_xlabel('Time (s)')
-    ax3.set_ylabel('Brightness')
+    ax3.set_ylabel('Brightness Deviation')
+    ax3.legend(loc='upper right', fontsize=8)
     ax3.grid(True, alpha=0.3)
     
-    # Add info box
-    norm_stats = (
-        f"Preprocessed Stats\n"
-        f"Mean: {np.mean(brightness_normalized):.1f}\n"
-        f"Std: {np.std(brightness_normalized):.2f}\n"
-        f"Range: {np.ptp(brightness_normalized):.1f}"
-    )
-    props = dict(boxstyle='round', facecolor='moccasin', alpha=0.7)
-    ax3.text(0.02, 0.98, norm_stats, transform=ax3.transAxes, fontsize=8,
-             verticalalignment='top', bbox=props, fontfamily='monospace')
-    
-    # Panel 4: Bandpass filtered signal (full width)
-    ax4 = fig.add_subplot(gs[2, :])
-    ax4.plot(time, processed_signal, 'g-', linewidth=0.5)
-    filter_label = f"Bandpass Filtered ({BANDPASS_LOW}-{BANDPASS_HIGH} Hz)" if USE_BANDPASS else "Detrended Only"
-    ax4.set_title(f'Final Processed Signal ({filter_label})', fontweight='bold')
-    ax4.set_xlabel('Time (s)')
-    ax4.set_ylabel('Brightness Deviation')
-    ax4.grid(True, alpha=0.3)
-    
-    # Add info box
-    proc_stats = (
-        f"Filtered Stats\n"
-        f"Mean: {np.mean(processed_signal):.2e}\n"
-        f"Std: {np.std(processed_signal):.2f}\n"
-        f"Range: {np.ptp(processed_signal):.1f}"
-    )
-    props = dict(boxstyle='round', facecolor='lightgreen', alpha=0.7)
-    ax4.text(0.02, 0.98, proc_stats, transform=ax4.transAxes, fontsize=8,
-             verticalalignment='top', bbox=props, fontfamily='monospace')
-    
     plt.tight_layout()
     return fig
 
 
-def create_analysis_figure(frequencies: np.ndarray, 
-                           power: np.ndarray,
-                           peak_freq_fft: float,
-                           strouhal_fft: float,
-                           peaks_fft: np.ndarray,
-                           lags: np.ndarray,
-                           autocorr: np.ndarray,
-                           peak_freq_autocorr: float,
-                           peak_period_autocorr: float,
-                           strouhal_autocorr: float,
-                           peaks_autocorr: np.ndarray) -> plt.Figure:
+def create_analysis_figure(full_signals, rois, fps, total_frames):
     """
-    Create visualization of FFT and Autocorrelation analysis with comparison summary.
+    Create Figure 2: FFT Power Spectrum and Autocorrelation for each ROI.
+    Uses the first segment for display.
     """
-    fig = plt.figure(figsize=(14, 10))
-    fig.suptitle('Vortex Shedding Analysis - Frequency Comparison\n(FFT vs Autocorrelation)', 
+    n_rois = len(rois)
+    colors = ['green', 'blue', 'orange', 'magenta']
+    
+    fig = plt.figure(figsize=(16, 12))
+    fig.suptitle('Frequency Analysis - FFT & Autocorrelation Comparison', 
                  fontsize=14, fontweight='bold')
     
-    # Create grid layout - 2 rows
-    gs = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.35)
+    # Layout: 2 rows (FFT, Autocorr) x n_rois columns
+    gs = fig.add_gridspec(2, n_rois, hspace=0.35, wspace=0.3)
     
-    # Panel 1: FFT Power Spectrum
-    ax1 = fig.add_subplot(gs[0])
-    ax1.semilogy(frequencies, power, 'b-', linewidth=1)
+    frames_per_seg = total_frames // NUM_SEGMENTS
     
-    # Mark FFT peaks
-    if len(peaks_fft) > 0:
-        ax1.semilogy(frequencies[peaks_fft], power[peaks_fft], 'r^', markersize=8, 
-                     label='Detected peaks')
-    
-    # Highlight dominant frequency
-    ax1.axvline(x=peak_freq_fft, color='r', linestyle='--', linewidth=2, 
-                label=f'Dominant: {peak_freq_fft:.2f} Hz')
-    
-    ax1.set_title('FFT Power Spectrum', fontweight='bold')
-    ax1.set_xlabel('Frequency (Hz)')
-    ax1.set_ylabel('Normalized Power')
-    ax1.set_xlim([0, min(frequencies[-1], BANDPASS_HIGH * 2)])
-    ax1.legend(loc='upper right')
-    ax1.grid(True, alpha=0.3)
-    
-    # Add FFT results text box
-    fft_text = (
-        f"FFT Results\n"
-        f"{'─' * 25}\n"
-        f"Frequency: {peak_freq_fft:.3f} Hz\n"
-        f"Period: {1000/peak_freq_fft:.2f} ms\n"
-        f"Strouhal: {strouhal_fft:.4f}"
-    )
-    props = dict(boxstyle='round', facecolor='lightblue', alpha=0.8)
-    ax1.text(0.02, 0.98, fft_text, transform=ax1.transAxes, fontsize=10,
-             verticalalignment='top', horizontalalignment='left',
-             bbox=props, fontfamily='monospace')
-    
-    # Panel 2: Autocorrelation
-    ax2 = fig.add_subplot(gs[1])
-    
-    # Limit display to reasonable lag range
-    max_display_lag = min(2.0, lags[-1])  # Show up to 2 seconds or max available
-    display_mask = lags <= max_display_lag
-    
-    ax2.plot(lags[display_mask], autocorr[display_mask], 'purple', linewidth=1)
-    ax2.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
-    
-    # Mark autocorrelation peaks
-    if len(peaks_autocorr) > 0:
-        valid_peaks = peaks_autocorr[peaks_autocorr < len(lags[display_mask])]
+    for r_idx, (sig_full, roi) in enumerate(zip(full_signals, rois)):
+        # Use first segment for visualization
+        segment = sig_full[:frames_per_seg]
+        n = len(segment)
+        
+        # Preprocess
+        sig_dt = signal.detrend(segment, type='linear')
+        if USE_BANDPASS and fps > 2*BANDPASS_HIGH:
+            nyq = 0.5 * fps
+            b, a = signal.butter(4, [BANDPASS_LOW/nyq, BANDPASS_HIGH/nyq], btype='band')
+            filtered = signal.filtfilt(b, a, sig_dt)
+        else:
+            filtered = sig_dt
+        
+        # FFT
+        window = np.hanning(n)
+        fft_res = rfft(filtered * window)
+        freqs = rfftfreq(n, d=1/fps)
+        power = np.abs(fft_res) ** 2
+        power_norm = power / np.max(power) if np.max(power) > 0 else power
+        
+        # Find FFT peak
+        valid_mask = (freqs >= BANDPASS_LOW) & (freqs <= BANDPASS_HIGH)
+        if np.any(valid_mask):
+            idx_search = np.where(valid_mask)[0]
+            idx_peak = idx_search[np.argmax(power[valid_mask])]
+            f_fft = freqs[idx_peak]
+        else:
+            f_fft = 0
+        
+        # Autocorrelation
+        norm_sig = (filtered - np.mean(filtered)) / (np.std(filtered) + 1e-9)
+        ac_full = np.correlate(norm_sig, norm_sig, mode='full')
+        ac = ac_full[n-1:]
+        ac = ac / ac[0]
+        lags = np.arange(len(ac)) / fps
+        
+        # Find AC peaks
+        min_dist = int(fps / BANDPASS_HIGH)
+        peaks, _ = signal.find_peaks(ac, height=0.0, distance=min_dist)
+        peaks = [p for p in peaks if lags[p] > 0.5/BANDPASS_HIGH]
+        
+        if len(peaks) > 0:
+            f_ac = 1.0 / lags[peaks[0]]
+        else:
+            f_ac = 0
+        
+        # Plot FFT (top row)
+        ax_fft = fig.add_subplot(gs[0, r_idx])
+        ax_fft.semilogy(freqs, power_norm, color=colors[r_idx % len(colors)], linewidth=1)
+        ax_fft.axvline(x=f_fft, color='red', linestyle='--', linewidth=1.5, 
+                       label=f'Peak: {f_fft:.2f} Hz')
+        ax_fft.set_title(f'{roi["label"]}\nFFT Spectrum', fontweight='bold', fontsize=10)
+        ax_fft.set_xlabel('Frequency (Hz)')
+        ax_fft.set_ylabel('Norm. Power')
+        ax_fft.set_xlim([0, BANDPASS_HIGH * 1.5])
+        ax_fft.legend(loc='upper right', fontsize=8)
+        ax_fft.grid(True, alpha=0.3)
+        
+        # Plot Autocorrelation (bottom row)
+        ax_ac = fig.add_subplot(gs[1, r_idx])
+        max_lag_display = min(3.0, lags[-1])  # Show up to 3 seconds
+        mask = lags <= max_lag_display
+        ax_ac.plot(lags[mask], ac[mask], color=colors[r_idx % len(colors)], linewidth=1)
+        ax_ac.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
+        
+        # Mark peaks
+        valid_peaks = [p for p in peaks if p < len(lags[mask])]
         if len(valid_peaks) > 0:
-            ax2.plot(lags[valid_peaks], autocorr[valid_peaks], 'r^', markersize=8,
-                     label='Detected peaks')
-    
-    # Highlight first peak (fundamental period)
-    if peak_period_autocorr > 0:
-        ax2.axvline(x=peak_period_autocorr, color='r', linestyle='--', linewidth=2,
-                    label=f'Period: {peak_period_autocorr*1000:.2f} ms')
-    
-    ax2.set_title('Autocorrelation Analysis', fontweight='bold')
-    ax2.set_xlabel('Lag (seconds)')
-    ax2.set_ylabel('Autocorrelation')
-    ax2.set_xlim([0, max_display_lag])
-    ax2.set_ylim([-0.5, 1.1])
-    ax2.legend(loc='upper right')
-    ax2.grid(True, alpha=0.3)
-    
-    # Add Autocorrelation results text box
-    autocorr_text = (
-        f"Autocorrelation Results\n"
-        f"{'─' * 25}\n"
-        f"Frequency: {peak_freq_autocorr:.3f} Hz\n"
-        f"Period: {peak_period_autocorr*1000:.2f} ms\n"
-        f"Strouhal: {strouhal_autocorr:.4f}"
-    )
-    props = dict(boxstyle='round', facecolor='plum', alpha=0.8)
-    ax2.text(0.02, 0.98, autocorr_text, transform=ax2.transAxes, fontsize=10,
-             verticalalignment='top', horizontalalignment='left',
-             bbox=props, fontfamily='monospace')
-    
-    # Add comparison summary text box
-    freq_diff = abs(peak_freq_fft - peak_freq_autocorr)
-    freq_diff_pct = 100 * freq_diff / peak_freq_fft if peak_freq_fft > 0 else 0
-    avg_freq = (peak_freq_fft + peak_freq_autocorr) / 2
-    avg_strouhal = (strouhal_fft + strouhal_autocorr) / 2
-    
-    comparison_text = (
-        f"Comparison Summary\n"
-        f"{'═' * 32}\n"
-        f"FFT Frequency:      {peak_freq_fft:.3f} Hz\n"
-        f"Autocorr Freq:      {peak_freq_autocorr:.3f} Hz\n"
-        f"Difference:         {freq_diff:.3f} Hz ({freq_diff_pct:.1f}%)\n"
-        f"{'─' * 32}\n"
-        f"Average Frequency:  {avg_freq:.3f} Hz\n"
-        f"Average Strouhal:   {avg_strouhal:.4f}\n"
-        f"{'─' * 32}\n"
-        f"Characteristic L:   {CHARACTERISTIC_LENGTH*1000:.2f} mm\n"
-        f"Flow Velocity:      {FLOW_VELOCITY:.2f} m/s"
-    )
-    props = dict(boxstyle='round', facecolor='wheat', alpha=0.9)
-    ax2.text(0.98, 0.98, comparison_text, transform=ax2.transAxes, fontsize=10,
-             verticalalignment='top', horizontalalignment='right',
-             bbox=props, fontfamily='monospace')
+            ax_ac.plot(lags[valid_peaks], ac[valid_peaks], 'r^', markersize=6)
+            if f_ac > 0:
+                ax_ac.axvline(x=1/f_ac, color='red', linestyle='--', linewidth=1.5,
+                             label=f'T={1000/f_ac:.1f}ms ({f_ac:.2f}Hz)')
+        
+        ax_ac.set_title(f'Autocorrelation', fontweight='bold', fontsize=10)
+        ax_ac.set_xlabel('Lag (s)')
+        ax_ac.set_ylabel('Correlation')
+        ax_ac.set_xlim([0, max_lag_display])
+        ax_ac.set_ylim([-0.5, 1.1])
+        ax_ac.legend(loc='upper right', fontsize=8)
+        ax_ac.grid(True, alpha=0.3)
     
     plt.tight_layout()
     return fig
 
-
-def print_results(peak_freq_fft: float, strouhal_fft: float,
-                  peak_freq_autocorr: float, peak_period_autocorr: float,
-                  strouhal_autocorr: float,
-                  fps: float, total_frames: int, duration: float):
-    """Print analysis results to console."""
-    print("\n" + "=" * 60)
-    print("VORTEX SHEDDING ANALYSIS RESULTS")
-    print("=" * 60)
-    print(f"\nVideo Properties:")
-    print(f"  • Frame Rate: {fps:.2f} fps")
-    print(f"  • Total Frames: {total_frames}")
-    print(f"  • Duration: {duration:.2f} seconds")
-    print(f"\nPhysical Parameters:")
-    print(f"  • Characteristic Length (L): {CHARACTERISTIC_LENGTH*1000:.2f} mm")
-    print(f"  • Flow Velocity (V): {FLOW_VELOCITY:.2f} m/s")
-    
-    print(f"\n" + "-" * 60)
-    print("METHOD 1: FFT Analysis")
-    print("-" * 60)
-    print(f"  • Vortex Shedding Frequency (f): {peak_freq_fft:.3f} Hz")
-    print(f"  • Period: {1/peak_freq_fft*1000:.2f} ms")
-    print(f"  • Strouhal Number (St = fL/V): {strouhal_fft:.4f}")
-    
-    print(f"\n" + "-" * 60)
-    print("METHOD 2: Autocorrelation Analysis")
-    print("-" * 60)
-    print(f"  • Vortex Shedding Frequency (f): {peak_freq_autocorr:.3f} Hz")
-    print(f"  • Period: {peak_period_autocorr*1000:.2f} ms")
-    print(f"  • Strouhal Number (St = fL/V): {strouhal_autocorr:.4f}")
-    
-    # Comparison
-    freq_diff = abs(peak_freq_fft - peak_freq_autocorr)
-    freq_diff_pct = 100 * freq_diff / peak_freq_fft if peak_freq_fft > 0 else 0
-    
-    print(f"\n" + "-" * 60)
-    print("COMPARISON")
-    print("-" * 60)
-    print(f"  • Frequency Difference: {freq_diff:.3f} Hz ({freq_diff_pct:.1f}%)")
-    avg_freq = (peak_freq_fft + peak_freq_autocorr) / 2
-    avg_strouhal = (strouhal_fft + strouhal_autocorr) / 2
-    print(f"  • Average Frequency: {avg_freq:.3f} Hz")
-    print(f"  • Average Strouhal Number: {avg_strouhal:.4f}")
-    
-    print("\n" + "=" * 60)
-    
-    # Compare to theoretical values
-    print("\nReference: For a circular cylinder, St ≈ 0.2 at Re > 1000")
-    if 0.15 < avg_strouhal < 0.25:
-        print("Your average Strouhal number is in the expected range for cylinder wake!")
-    print("=" * 60 + "\n")
-
+# =============================================================================
+# MAIN PIPELINE
+# =============================================================================
 
 def main():
-    """Main analysis pipeline."""
-    print("\n" + "=" * 60)
-    print("VORTEX SHEDDING FREQUENCY ANALYZER")
-    print("=" * 60)
+    print("="*80)
+    print(f"MULTI-SEGMENT VORTEX ANALYZER ({len(ROIS)} ROIs, {NUM_SEGMENTS} Segments)")
+    print("="*80)
     
-    # Validate video path
+    # 1. Load Video & Extract Full Signals
     if not Path(VIDEO_PATH).exists():
-        print(f"\nERROR: Video file not found: {VIDEO_PATH}")
-        print("Please update VIDEO_PATH in the configuration section.")
-        print("\nTo use this script:")
-        print("  1. Set VIDEO_PATH to your wind tunnel video file")
-        print("  2. Adjust ROI coordinates to capture the wake region")
-        print("  3. Set CHARACTERISTIC_LENGTH and FLOW_VELOCITY")
-        print("  4. Run the script again")
+        print(f"Error: {VIDEO_PATH} not found.")
         return
+
+    cap, fps_vid, total_frames = VideoLoader.load_info(VIDEO_PATH)
+    fps = FRAME_RATE if FRAME_RATE else fps_vid
     
-    # Load video
-    print(f"\nLoading video: {VIDEO_PATH}")
-    cap, fps, total_frames, width, height = load_video_info(VIDEO_PATH)
-    
-    # Use configured frame rate if specified
-    if FRAME_RATE is not None:
-        fps = FRAME_RATE
-        print(f"Using configured frame rate: {fps} fps")
-    
-    duration = total_frames / fps
-    print(f"Video info: {width}x{height}, {fps:.2f} fps, {total_frames} frames, {duration:.2f}s")
-    
-    # Validate ROI
-    roi = (ROI_X, ROI_Y, ROI_WIDTH, ROI_HEIGHT)
-    if ROI_X + ROI_WIDTH > width or ROI_Y + ROI_HEIGHT > height:
-        print(f"\nERROR: ROI exceeds frame boundaries!")
-        print(f"Frame size: {width}x{height}")
-        print(f"ROI: x={ROI_X}, y={ROI_Y}, w={ROI_WIDTH}, h={ROI_HEIGHT}")
-        cap.release()
-        return
-    
-    print(f"ROI: x={ROI_X}, y={ROI_Y}, width={ROI_WIDTH}, height={ROI_HEIGHT}")
-    
-    # Extract brightness from ROI (with optional normalization and detrending)
-    brightness_raw, brightness_normalized, sample_frame, roi_frame = extract_roi_brightness(
-        cap, roi, total_frames,
-        normalize=NORMALIZE_FRAMES,
-        detrend=DETREND_BRIGHTNESS
+    # Extract continuous signals for all ROIs (now returns raw, processed, and frame)
+    raw_signals, full_signals, roi_frame = VideoLoader.extract_all_brightness(
+        cap, ROIS, total_frames, NORMALIZE_FRAMES
     )
     cap.release()
     
-    # Create time array
-    time = np.arange(len(brightness_raw)) / fps
+    # Use actual extracted frames (may be less than total_frames if some failed to read)
+    actual_frames = len(raw_signals[0])
     
-    # Preprocess signal (bandpass filtering on the normalized/detrended brightness)
-    print("\nPreprocessing signal (bandpass filtering)...")
-    processed_signal = preprocess_signal(
-        brightness_normalized, fps, 
-        BANDPASS_LOW, BANDPASS_HIGH,
-        USE_BANDPASS
-    )
+    # Create time array based on actual extracted frames
+    time_arr = np.arange(actual_frames) / fps
+
+    # 2. Segment Analysis
+    frames_per_seg = actual_frames // NUM_SEGMENTS
+    print(f"\nSegmentation: {NUM_SEGMENTS} segments of ~{frames_per_seg/fps:.2f}s each.")
     
-    # Compute FFT
-    print("Computing FFT...")
-    frequencies, power = compute_fft(processed_signal, fps)
+    final_report_rows = []
+
+    for r_idx, roi_conf in enumerate(ROIS):
+        roi_name = roi_conf["label"]
+        raw_signal = full_signals[r_idx]
+        
+        # Store results for each segment of this ROI
+        seg_results = []
+        
+        print(f"  Analzying {roi_name}...")
+        for s in range(NUM_SEGMENTS):
+            start = s * frames_per_seg
+            end = start + frames_per_seg
+            
+            # Slice the signal
+            segment_data = raw_signal[start:end]
+            
+            # Run analysis
+            res = analyze_segment(segment_data, fps)
+            if res:
+                seg_results.append(res)
+        
+        # Compile statistics for this ROI across all segments
+        roi_stats = compile_roi_statistics(roi_name, seg_results)
+        final_report_rows.append(roi_stats)
+
+    # 3. Final Report Table
+    print("\n" + "="*100)
+    print("FINAL COMPILED METRICS TABLE")
+    print("="*100)
     
-    # Find dominant frequency from FFT
-    print("Finding dominant frequency (FFT)...")
-    peak_freq_fft, peak_power_fft, peaks_fft = find_dominant_frequency(
-        frequencies, power, 
-        min_freq=BANDPASS_LOW
-    )
+    # Define columns for display
+    # FQ=FFT Quality, PS=Autocorr Strength, PSRQ=Peak/Backg, FA=Method Diff, RepCV=Variation
+    headers = [
+        "ROI", "f_fft (Hz)", "St_fft ± Err", "f_ac (Hz)", "St_ac ± Err",
+        "FQ", "PS", "PSRQ", "FA (%)", "RepCV (%)"
+    ]
     
-    # Calculate Strouhal number from FFT
-    strouhal_fft = calculate_strouhal(peak_freq_fft, CHARACTERISTIC_LENGTH, FLOW_VELOCITY)
+    # Print Header
+    header_fmt = "{:<22} | {:<10} | {:<14} | {:<10} | {:<14} | {:<6} | {:<6} | {:<6} | {:<8} | {:<9}"
+    print(header_fmt.format(*headers))
+    print("-" * 135)
     
-    # Compute Autocorrelation
-    print("Computing autocorrelation...")
-    lags, autocorr = compute_autocorrelation(processed_signal, fps)
+    for row in final_report_rows:
+        st_fft_str = f"{row['St_fft']:.3f}±{row['St_fft_err']:.3f}"
+        st_ac_str = f"{row['St_ac']:.3f}±{row['St_ac_err']:.3f}"
+        
+        print(header_fmt.format(
+            row["ROI"],
+            f"{row['f_fft']:.3f}",
+            st_fft_str,
+            f"{row['f_ac']:.3f}",
+            st_ac_str,
+            f"{row['FQ']:.1f}",
+            f"{row['PS']:.3f}",
+            f"{row['PSRQ']:.1f}",
+            f"{row['FA_pct']:.1f}",
+            f"{row['RepCV_fft']:.1f}"
+        ))
+    print("="*135)
+    print("Legend:")
+    print("  St_fft: Strouhal number from FFT frequency")
+    print("  St_ac:  Strouhal number from Autocorrelation frequency")
+    print("  FQ:     FFT Peak Quality (Peak Amp / Local Noise)")
+    print("  PS:     Periodicity Strength (Autocorr Peak Height)")
+    print("  PSRQ:   Peak-to-Background Ratio (Autocorr Peak / Background Std)")
+    print("  FA:     Frequency Agreement % between FFT and Autocorr")
+    print("  RepCV:  Coeff of Variation of FFT frequency across segments (Repeatability)")
+    print("="*135)
     
-    # Find dominant frequency from autocorrelation
-    print("Finding dominant frequency (Autocorrelation)...")
-    peak_freq_autocorr, peak_period_autocorr, peaks_autocorr, peak_lags = find_autocorr_frequency(
-        lags, autocorr, fps, min_freq=BANDPASS_LOW
-    )
+    # 4. Generate Visualization Figures
+    print("\nGenerating visualization figures...")
     
-    # Calculate Strouhal number from autocorrelation
-    strouhal_autocorr = calculate_strouhal(peak_freq_autocorr, CHARACTERISTIC_LENGTH, FLOW_VELOCITY) if peak_freq_autocorr > 0 else 0.0
+    # Figure 1: Video frame with ROIs and signal plots
+    fig_signal = create_signal_figure(roi_frame, time_arr, raw_signals, full_signals, ROIS, fps)
     
-    # Print results
-    print_results(peak_freq_fft, strouhal_fft, 
-                  peak_freq_autocorr, peak_period_autocorr, strouhal_autocorr,
-                  fps, total_frames, duration)
-    
-    # Create visualizations
-    print("Generating plots...")
-    
-    # Figure 1: Signal data (ROI, raw, normalized, and filtered signals)
-    fig_signal = create_signal_figure(
-        roi_frame, time, brightness_raw, brightness_normalized, processed_signal
-    )
-    
-    # Figure 2: Frequency analysis (FFT and Autocorrelation with summary)
-    fig_analysis = create_analysis_figure(
-        frequencies, power, peak_freq_fft, strouhal_fft, peaks_fft,
-        lags, autocorr, peak_freq_autocorr, peak_period_autocorr, 
-        strouhal_autocorr, peaks_autocorr
-    )
+    # Figure 2: FFT and Autocorrelation analysis
+    fig_analysis = create_analysis_figure(full_signals, ROIS, fps, actual_frames)
     
     # Save figures
     base_name = Path(VIDEO_PATH).stem
     
     signal_path = base_name + "_signal.png"
     fig_signal.savefig(signal_path, dpi=150, bbox_inches='tight')
-    print(f"Signal figure saved: {signal_path}")
+    print(f"  Saved: {signal_path}")
     
     analysis_path = base_name + "_analysis.png"
     fig_analysis.savefig(analysis_path, dpi=150, bbox_inches='tight')
-    print(f"Analysis figure saved: {analysis_path}")
+    print(f"  Saved: {analysis_path}")
     
-    # Show plots
+    # Show figures
     plt.show()
     
     print("\nAnalysis complete!")
 
-
 if __name__ == "__main__":
     main()
-
