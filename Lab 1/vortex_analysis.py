@@ -24,10 +24,10 @@ VIDEO_PATH = "Laser1.mov"
 
 # --- ROIs (x, y, w, h) ---
 ROIS = [
-    {"coords": (775, 550, 50, 50), "label": "ROI 1 (0.5-1.0D, Narrow)"},
-    {"coords": (775, 550, 100, 50), "label": "ROI 2 (0.5-1.0D, Wide)"},
-    {"coords": (900, 550, 50, 50), "label": "ROI 3 (1.0-1.5D, Narrow)"},
-    {"coords": (900, 550, 100, 50), "label": "ROI 4 (1.0-1.5D, Wide)"}
+    {"coords": (775, 550, 62, 62), "label": "ROI 1 (0.5-1.0D, Narrow)"},
+    {"coords": (775, 550, 125, 62), "label": "ROI 2 (0.5-1.0D, Wide)"},
+    {"coords": (900, 550, 62, 62), "label": "ROI 3 (1.0-1.5D, Narrow)"},
+    {"coords": (900, 550, 125, 62), "label": "ROI 4 (1.0-1.5D, Wide)"}
 ]
 
 # --- Segmentation Settings ---
