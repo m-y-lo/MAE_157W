@@ -1,3 +1,21 @@
 # macOS
 .DS_Store
 
+# Report files (LaTeX and PDF)
+*.tex
+*.pdf
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex*
+*.synctex(busy)
+
+# Pictures / images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.webp

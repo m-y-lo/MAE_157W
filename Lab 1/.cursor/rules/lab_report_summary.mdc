@@ -1,0 +1,66 @@
+---
+description: Context and guidelines for writing a lab report based on the "Lab 1 - Wind Tunnel Introduction" document. This file includes tunnel components, experimental procedures, and key aerodynamic principles.
+alwaysApply: false
+---
+# Wind Tunnel Lab: Context & Report Guidelines
+
+This document provides the necessary background, technical specifications, and procedural context derived from the "Lab 1 - Wind Tunnel Introduction" materials to assist in drafting a professional laboratory report.
+
+---
+
+## 1. Laboratory Objectives
+[cite_start]The primary goal of this lab series is to introduce students to wind tunnel operations, flow visualization, and the empirical study of aerodynamic scaling laws[cite: 7, 11].
+* [cite_start]**Session 1**: Calibration of free-stream velocity ($U$) and calculation of Reynolds Number ($Re$)[cite: 248].
+* [cite_start]**Sessions 2 & 3**: Optimization of imaging techniques to measure vortex-shedding frequency ($f_s$) and the Strouhal Number ($St$)[cite: 260].
+* [cite_start]**Session 4**: Investigating the relationship between $Re$ and $St$ across different cylinder diameters and flow speeds[cite: 274].
+
+---
+
+## 2. Equipment & Experimental Setup
+### Wind Tunnel Components
+* [cite_start]**Flow Straightener**: Used to ensure a uniform, laminar-like entry of air[cite: 17, 79].
+* [cite_start]**Contraction Cone**: Accelerates the air into the test section[cite: 14].
+* [cite_start]**Test Section**: The transparent area where models (cylinders, cars, airfoils) are placed for observation[cite: 19, 77].
+* [cite_start]**Diffuser**: Gradually slows the air down before it reaches the fan[cite: 15].
+* [cite_start]**Fan Section**: Provides the suction required to pull air through the tunnel[cite: 21, 78].
+
+### Flow Visualization & Tools
+* [cite_start]**Seeding**: A glycerin-water mixture is nebulized into fine aerosol droplets to serve as passive tracers[cite: 66, 71].
+* [cite_start]**Lighting**: Top-mounted LED lights illuminate the tracers for high-speed filming[cite: 80, 84].
+* [cite_start]**Instrumentation**: High-speed camera (phone at 120–240 fps), glycerin fogger, and smoke rake for generating distinct streamlines[cite: 82, 83, 253].
+
+---
+
+## 3. Key Aerodynamic Principles
+### Scaling & Similarity
+* [cite_start]**Reynolds Number ($Re$)**: A dimensionless value representing the ratio of inertial forces to viscous forces[cite: 6].
+* [cite_start]**Strouhal Number ($St$)**: Describes oscillating flow mechanisms, specifically vortex shedding[cite: 133].
+    * [cite_start]Formula: $St = \frac{f_s D}{U}$[cite: 141].
+    * [cite_start]Expected Value: Approximately **0.2** for cylinders across a wide range of $Re$[cite: 143, 184].
+
+### Flow Phenomena
+* [cite_start]**Vortex Shedding**: Occurs when flow separates from blunt objects, creating a repeating pattern of swirling wakes known as a **Kármán Vortex Street**[cite: 115, 116].
+* [cite_start]**Boundary Layer Growth**: Air slows down near the tunnel walls, which can bias measurements if the "Area Ratio" ($A_{model}/A_{tunnel}$) is too high[cite: 43, 44, 51].
+* [cite_start]**Blockage Effects**: Large models can artificially accelerate flow, shifting the effective Reynolds number[cite: 48, 58].
+
+---
+
+## 4. Data Processing Methods
+To extract the shedding frequency ($f_s$) from video data, the following signal processing techniques are used:
+1.  [cite_start]**ROI Cropping & Brightness Extraction**: Converting video frames to TIFFs and tracking brightness variations over time in a specific Region of Interest (ROI)[cite: 265].
+2.  [cite_start]**Autocorrelation**: Measuring the degree of similarity in the signal over successive time intervals to reveal periodic patterns[cite: 217, 220].
+3.  [cite_start]**Fast Fourier Transform (FFT)**: Converting the brightness-time signal into the frequency domain to identify the dominant peak ($f_s$)[cite: 244, 247].
+
+---
+
+## 5. Report Structure Requirements
+* [cite_start]**Introduction**: Define the purpose of wind tunnel testing (e.g., reducing cost/risk, visualizing complex flows)[cite: 11, 12].
+* [cite_start]**Methods**: Detail the fan settings, calibration marks for velocity, and the specific imaging/lighting conditions used[cite: 254, 264].
+* **Results**:
+    * [cite_start]Table of $U$ and $Re$ for at least 3 fan speeds[cite: 259].
+    * [cite_start]Plots showing the Signal vs. Time, Autocorrelation, and FFT[cite: 270].
+    * [cite_start]$f_s$ vs. $U$ (expected linear trend)[cite: 283].
+    * [cite_start]$St$ vs. $Re$ (expected constant trend $\sim 0.2$)[cite: 287].
+* [cite_start]**Discussion**: Analyze uncertainty sources (e.g., parallax, particle relaxation time) and the impact of 3D effects or turbulence at high $Re$[cite: 75, 186, 200].---
+alwaysApply: true
+---

@@ -35,7 +35,7 @@ NUM_SEGMENTS = 5  # Split video into this many equal time chunks
 
 # --- Physical Parameters & Uncertainty ---
 # St = f * L / V
-L_CHAR = 0.059       # meters (Diameter)
+L_CHAR = 0.0118       # meters (Diameter)
 L_UNCERTAINTY = 0.001 # meters (e.g. 0.5mm uncertainty)
 
 V_FLOW = 0.363       # m/s
@@ -44,7 +44,7 @@ V_UNCERTAINTY = 0.0364 # m/s (e.g. 0.01 m/s uncertainty)
 # --- Signal Processing ---
 FRAME_RATE = 240         # Set None to auto-detect
 BANDPASS_LOW = 0.5       
-BANDPASS_HIGH = 5.0      
+BANDPASS_HIGH = 10      
 USE_BANDPASS = True      
 NORMALIZE_FRAMES = True  
 DETREND_BRIGHTNESS = True

@@ -1,0 +1,143 @@
+---
+description: Lab report LaTeX writing helper for MAE 157W vortex shedding lab.
+globs:
+  - "**/*.tex"
+  - "**/lab*.md"
+alwaysApply: false
+---
+
+# Lab Report Writing Agent Guide
+
+This document summarizes the principles of effective laboratory report writing and converts them into actionable rules so an AI agent can generate high‑quality LaTeX (.tex) reports.
+
+---
+
+## 1. Purpose of a Lab Report
+- Communicate experimental objectives, methods, results, and interpretations clearly.
+- Allow another engineer or scientist to reproduce the work.
+- Demonstrate understanding of uncertainty, error, and limitations.
+- Present data in a professional and structured technical format.
+
+---
+
+## 2. Standard Report Structure
+The agent should generate LaTeX reports using the following sections in this order:
+
+### 2.1 Title
+- Concise description of the experiment.
+- Include author, date, course, and lab section.
+
+### 2.2 Abstract
+- 3–6 sentences summarizing:
+  - Objective
+  - Method
+  - Key numerical results
+  - Main conclusion
+- No citations or detailed theory.
+
+### 2.3 Introduction
+- State the problem and motivation.
+- Present relevant theory and equations.
+- Define variables and expected relationships.
+
+### 2.4 Methods / Procedure
+- Describe equipment and measurement tools.
+- Explain how data were collected.
+- Include uncertainty of instruments.
+- Write in past tense and passive voice.
+
+### 2.5 Results
+- Present tables and figures before interpretation.
+- Report calculated values with units and significant figures.
+- Include statistics such as mean, standard deviation, and standard error.
+- Refer to tables/figures explicitly in the text.
+
+### 2.6 Discussion
+- Interpret what the results mean.
+- Compare measured values with accepted values.
+- Analyze trends in accuracy between instruments.
+- Identify dominant sources of error (e.g., measurement uncertainty vs. sample variation).
+- Explain how additional measurements would affect uncertainty.
+- Discuss operator bias and experimental limitations.
+
+### 2.7 Conclusion
+- Restate main findings quantitatively.
+- State whether objectives were met.
+- Provide recommendations for improvement.
+
+---
+
+## 3. Formatting Rules for LaTeX Generation
+- Use structured environments: section{}, subsection{}, table, and figure.
+- All numbers must include units.
+- Uncertainty should be written as: value ± uncertainty.
+- Tables require captions above; figures require captions below.
+- Equations must be numbered and referenced.
+
+### Style Preferences
+- Formal technical tone, third person.
+- Past tense for procedure.
+- Avoid first‑person opinions.
+- Use precise quantitative language.
+
+---
+
+## 4. Data Interpretation Guidelines
+- Evaluate agreement between different measuring devices.
+- Use standard error of the mean to judge data reliability.
+- Distinguish between:
+  - Random error
+  - Systematic error
+  - Instrument resolution limits
+- Emphasize that small SEM relative to measurements implies good population representation.
+
+---
+
+## 5. Example Reasoning Patterns
+When writing the Discussion, the agent should:
+- Compare calculated properties to known material values to identify the sample.
+- Note trends such as increased precision from ruler → caliper → micrometer.
+- Explain why more samples reduce uncertainty only slowly (law of large numbers).
+- Consider human bias when using analog instruments.
+
+---
+
+## 6. LaTeX Template Skeleton
+
+\documentclass{article}
+\usepackage{amsmath, graphicx, siunitx}
+
+\begin{document}
+
+\title{}
+\author{}
+\date{}
+\maketitle
+
+\begin{abstract}
+
+\end{abstract}
+
+\section{Introduction}
+
+\section{Methods}
+
+\section{Results}
+
+\section{Discussion}
+
+\section{Conclusion}
+
+\end{document}
+
+---
+
+## 7. Agent Behavior Rules
+1. Always include uncertainty analysis.
+2. Never present interpretation before results.
+3. Every figure/table must be referenced in text.
+4. Conclusions must be supported by numbers.
+5. Maintain reproducibility as the primary goal.
+
+This guide should be used as the internal instruction set whenever generating a LaTeX laboratory report.
+

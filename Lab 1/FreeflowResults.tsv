@@ -1,0 +1,42 @@
+	CONSTANTS								
+		Value	Error		COLORING SCHEME				
+	rho (density @ 20C), kg/m3	1.20E+00				-> CONSTANT			
+	mu , 1.81*10^-5 Pa\c.ps	1.81E-05				-> MEASURED			
+	fps	2.40E+02				-> CALCULATED			
+	L (m)	0.015							
+	c (m)	0.059	0.001	0.06	0.06				
+									
+	FAN SPEED 1	Measurement #	#1	#2	#3	#4	#5	Average	Error
+		f1							
+		f2							
+		delta frames	9	11	10	9	11		
+		U	4.00E-01	3.27E-01	3.60E-01	4.00E-01	3.27E-01	3.6291E-01	3.6400E-02
+		Re	-	-	-	-	-	1.4243E+03	1.4488E+02
+									
+	FAN SPEED 2	Measurement #	#1	#2	#3	#4	#5	Average	Error
+		f1							
+		f2							
+		delta frames	9	10	11	10	9		
+		U	4.00E-01	3.60E-01	3.27E-01	3.60E-01	4.00E-01	3.6945E-01	3.0920E-02
+		Re	-		-	-	-	1.4500E+03	1.2381E+02
+									
+	FAN SPEED 3	Measurement #	#1	#2	#3	#4	#5	Average	Error
+		f1							
+		f2							
+		delta frames	10	8	9	10	8		
+		U	3.60E-01	4.50E-01	4.00E-01	3.60E-01	4.50E-01	4.0400E-01	4.5056E-02
+		Re	-	-	-	-	-	1.5856E+03	1.7886E+02
+									
+	FAN SPEED 4	Measurement #	#1	#2	#3	#4	#5	Average	Error
+		f1							
+		f2							
+		delta frames	9	8	8	7	8		
+		U	4.00E-01	4.50E-01	4.50E-01	5.14E-01	4.50E-01	4.5286E-01	4.0595E-02
+		Re	-	-	-	-	-	1.7773E+03	1.6214E+02
+									
+	FAN SPEED 5	Measurement #	#1	#2	#3	#4	#5	Average	Error
+		f1	599	634	803	1023	2031		
+		f2	607	642	810	1031	2039		
+		delta frames	8	8	7	8	8		
+		U	4.50E-01	4.50E-01	5.14E-01	4.50E-01	4.50E-01	4.6286E-01	2.8749E-02
+		Re	-	-	-	-	-	1.8165E+03	1.1696E+02
